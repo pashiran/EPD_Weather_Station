@@ -42,10 +42,12 @@ const char* ultra_srt_fcst_url = "http://apis.data.go.kr/1360000/VilageFcstInfoS
 const char* vilage_fcst_url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"; // 단기예보조회
 const char* fcst_version_url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getFcstVersion"; // 예보버전조회
 
-//중기예보/
-/*
+//중기예보
+const char* mid_fcst_url = "http://apis.data.go.kr/1360000/MidFcstInfoService/getMidFcst"; // 중기예보조회
+const char* mid_land_fcst_url = "http://apis.data.go.kr/1360000/MidFcstInfoService/getMidLandFcst"; // 중기육상예보조회
+const char* mid_ta_url = "http://apis.data.go.kr/1360000/MidFcstInfoService/getMidTa"; // 중기기온조회
+const char* mid_sea_fcst_url = "http://apis.data.go.kr/1360000/MidFcstInfoService/getMidSeaFcst"; // 중기해상예보조회
 
-*/
 
 
 
@@ -121,11 +123,17 @@ void setup() {
   // 3. 현재 위치 호출 (임시로 서울 성북구 지정)
   Serial.println("Location set to 성북구 (nx: " + String(location_x) + ", ny: " + String(location_y) + ")");
 
-  // 4. 단기예보 API 호출
+  // 4.단기예보 API 호출
   callUltraSrtNcstAPI(); // 초단기 실황조회
   callUltraSrtFcstAPI(); // 초단기 예보조회
   callVilageFcstAPI();   // 단기예보조회
   callFcstVersionAPI();  // 예보버전조회
+
+  // 5. 중기예보 API 호출
+  callMidForecastAPI();  // 중기예보조회
+  callMidLandFcstAPI(); //중기육상예보조회
+  callMidTaAPI();       //중기기온조회
+  callMidSeaFcstAPI();  //중기해상예보조회
 }
 
 void callAPI(const char* api_url, String params) {
@@ -175,9 +183,7 @@ void callUltraSrtFcstAPI() { // 초단기 예보조회
   callAPI(ultra_srt_fcst_url, params);
 }
 
-
-
-void callVilageFcstAPI() {
+void callVilageFcstAPI() {    //단기예보조회
   Serial.println("단기예보조회 호출");
     int fcstHours[] = {2, 5, 8, 11, 14, 17, 20, 23};
     int currentHour = timeClient.getHours();
@@ -249,7 +255,7 @@ void callVilageFcstAPI() {
     Serial.println("단기예보 데이터를 찾을 수 없습니다.");
 }
 
-void callFcstVersionAPI() {
+void callFcstVersionAPI() {   //예보버전조회
   Serial.println("예보버전조회 호출");
   String params = "?serviceKey=" + String(api_key) +
                   "&numOfRows=10" +
@@ -260,16 +266,112 @@ void callFcstVersionAPI() {
   callAPI(fcst_version_url, params);
 }
 
-void processAPIResponse(String response) {
-  if (response.indexOf("\"resultCode\":\"00\"") != -1) {
-    // 성공적인 응답 처리
-    Serial.println("API 호출 성공");
-  } else {
-    // 에러 응답 처리
-    Serial.println("API 호출 실패");
-    Serial.println(response);
-  }
+// 중기예보 공통 시간 계산 함수 추가
+String getMidFcstTime() {
+    // 현재 시간을 기준으로 발표시각 계산
+    time_t epochTime = timeClient.getEpochTime();
+    struct tm *ptm = gmtime((time_t *)&epochTime);
+    
+    // 발표시각은 06시와 18시
+    int currentHour = ptm->tm_hour;
+    int baseHour;
+    
+    // 현재 시각에 따른 발표시각 결정
+    if (currentHour >= 18) {
+        baseHour = 18;
+    } else if (currentHour >= 6) {
+        baseHour = 6;
+    } else {
+        // 6시 이전인 경우 전날 18시 기준
+        epochTime -= 86400;
+        ptm = gmtime((time_t *)&epochTime);
+        baseHour = 18;
+    }
+    
+    char tmFc[13];
+    sprintf(tmFc, "%04d%02d%02d%02d00", 
+            ptm->tm_year + 1900,
+            ptm->tm_mon + 1,
+            ptm->tm_mday,
+            baseHour);
+            
+    return String(tmFc);
 }
+
+void callMidForecastAPI() {   //중기예보조회
+    const char* stnId = "109";  // 예: 서울, 인천, 경기도 (중기기상전망조회 지점번호)
+    String fcstTime = getMidFcstTime();
+    Serial.println("발표시각: " + fcstTime);
+    
+    String params = "?serviceKey=" + String(api_key) +
+                   "&numOfRows=10" +
+                   "&pageNo=1" +
+                   "&stnId=" + stnId +
+                   "&tmFc=" + fcstTime +
+                   "&dataType=JSON";
+
+    callAPI(mid_fcst_url, params);
+}
+
+void callMidLandFcstAPI() {  // 중기육상예보조회
+    Serial.println("중기육상예보조회 호출");
+    String fcstTime = getMidFcstTime();
+    Serial.println("발표시각: " + fcstTime);
+    
+    String params = "?serviceKey=" + String(api_key) +
+                    "&numOfRows=10" +
+                    "&pageNo=1" +
+                    "&regId=11B00000" + // 서울, 인천, 경기도 코드
+                    "&tmFc=" + fcstTime +
+                    "&dataType=JSON";
+    callAPI(mid_land_fcst_url, params);
+}
+
+void callMidTaAPI() {  // 중기기온조회
+    Serial.println("중기기온조회 호출");
+    String fcstTime = getMidFcstTime();
+    Serial.println("발표시각: " + fcstTime);
+    
+    String params = "?serviceKey=" + String(api_key) +
+                    "&numOfRows=10" +
+                    "&pageNo=1" +
+                    "&regId=11B10101" + // 서울 코드
+                    "&tmFc=" + fcstTime +
+                    "&dataType=JSON";
+    callAPI(mid_ta_url, params);
+}
+
+void callMidSeaFcstAPI() {  // 중기해상예보조회
+    Serial.println("중기해상예보조회 호출");
+    String fcstTime = getMidFcstTime();
+    Serial.println("발표시각: " + fcstTime);
+    
+    String params = "?serviceKey=" + String(api_key) +
+                    "&numOfRows=10" +
+                    "&pageNo=1" +
+                    "&regId=12A20000" + // 서해중부 코드
+                    "&tmFc=" + fcstTime +
+                    "&dataType=JSON";
+    callAPI(mid_sea_fcst_url, params);
+}
+
+void processAPIResponse(String response) {
+    if (response.indexOf("\"resultCode\":\"00\"") != -1) {
+        Serial.println("API 호출 성공");
+        // JSON 파싱 및 데이터 처리
+        // 필요한 경우 ArduinoJson 라이브러리 사용 권장
+    } else {
+        Serial.println("API 호출 실패");
+        if (response.indexOf("\"resultCode\":\"03\"") != -1) {
+            Serial.println("데이터 없음");
+        } else {
+            Serial.println("에러 응답: " + response);
+        }
+    }
+}
+
+
+
 
 void loop() {
   // 추후 API 호출 및 데이터 처리 반복
