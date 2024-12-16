@@ -2,347 +2,275 @@
 #include <HTTPClient.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
-#include <Arduino_JSON.h>
-#include "Region_DB.h" // Region_DB.h 파일 포함
-
-// 함수 선언
-void getShortTermWeather();
-void GetMidLandForecast(String city);
-void GetMidForecast(String city);
-void GetMidTemperature(String city);
-void GetMidSeaForecast(String region);
-String formatPayload(String payload);
 
 // Wi-Fi 설정
 struct WiFiCredentials {
-  const char* ssid;
-  const char* password;
+    const char* ssid;
+    const char* password;
 };
 
-WiFiCredentials wifiList[] = {
-  {"jongsfold", "nrax5375"},
-  {"1F", "!a1b2c3d4e5"},
-  {"8th_floor_home", "ryanajoosweet"},
-  {"SK_WiFiGIGA304C", "1808020722"}
+// 여러 개의 와이파이 정보 설정
+const WiFiCredentials wifiNetworks[] = {
+    {"jongsfold", "nrax5375"},     // 첫 번째 와이파이
+    {"8th_floor_home", "ryanajoosweet"}, // 두 번째 와이파이
+   // {"another_wifi", "another_pass"} // 세 번째 와이파이
 };
+const int numNetworks = sizeof(wifiNetworks) / sizeof(wifiNetworks[0]);
 
-const char* apiKey = "3BXdtOYTQgwY%2FncPf6kCtZiX8FDuzXs8Pd66HbbAcSpsYrF%2BRz3gmttlkhF3oCOyESziNpJ5kCeBNk%2Bg1%2BC1pA%3D%3D";
-const long utcOffsetInSeconds = 3600 * 9; // 한국 표준시 (UTC+9)
-
-// 타임서버 설정
+// NTP 설정
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", utcOffsetInSeconds);
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 9 * 3600, 60000); // 서울 기준 (GMT+9)
 
-// 업데이트 간격 (예: 10분)
-unsigned long updateInterval = 600000;
-unsigned long previousMillis = 0;
+// API 요청 데이터
+String base_time;
+String base_date;
+String basedatetime;
 
-// 서울 성북구의 좌표 (NX, NY)
-const int NX = 61; // X 좌표
-const int NY = 127; // Y 좌표
+// 현재 위치 정보 (서울 성북구 임시 설정)
+const int location_x = 61; // 예: nx 값
+const int location_y = 127; // 예: ny 값
 
-void connectToWiFi() {
-  for (WiFiCredentials wifi : wifiList) {
-    WiFi.begin(wifi.ssid, wifi.password);
-    delay(3000); // 3초 대기
+// API 인증키
+const char* api_key = "3BXdtOYTQgwY%2FncPf6kCtZiX8FDuzXs8Pd66HbbAcSpsYrF%2BRz3gmttlkhF3oCOyESziNpJ5kCeBNk%2Bg1%2BC1pA%3D%3D";
 
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("Connected to WiFi: " + String(wifi.ssid));
-      return;
-    }
-  }
-  
-  Serial.println("Failed to connect to any WiFi network");
-}
+
+
+// API URL
+//단기예보
+const char* ultra_srt_ncst_url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getUltraSrtNcst"; // 초단기 실황조회
+const char* ultra_srt_fcst_url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getUltraSrtFcst";  // 초단기 예보조회
+const char* vilage_fcst_url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"; // 단기예보조회
+const char* fcst_version_url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getFcstVersion"; // 예보버전조회
+
+//중기예보/
+/*
+
+*/
+
+
 
 void setup() {
   Serial.begin(115200);
 
-  connectToWiFi();
+  // 와이파이 연결 시도
+  bool connected = false;
+  Serial.println("Attempting to connect to WiFi...");
+  
+  for (int i = 0; i < numNetworks && !connected; i++) {
+    Serial.printf("\nTrying to connect to %s\n", wifiNetworks[i].ssid);
+    WiFi.begin(wifiNetworks[i].ssid, wifiNetworks[i].password);
+    
+    // 10초 동안 연결 시도
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+      delay(500);
+      Serial.print(".");
+      attempts++;
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      connected = true;
+      Serial.printf("\nConnected to %s successfully!\n", wifiNetworks[i].ssid);
+      Serial.printf("IP address: %s\n", WiFi.localIP().toString().c_str());
+    } else {
+      Serial.printf("\nFailed to connect to %s\n", wifiNetworks[i].ssid);
+      WiFi.disconnect();
+    }
+  }
+  
+  if (!connected) {
+    Serial.println("\nFailed to connect to any WiFi network!");
+    // 여기서 실패 처리를 할 수 있습니다 (예: ESP32 재시작)
+    ESP.restart();
+  }
 
-  // 타임서버 연결
+  // 2. NTP 서버에서 시간 가져오기
   timeClient.begin();
-  timeClient.update();
+  timeClient.setTimeOffset(32400); // 한국 시간 (UTC+9)
+  
+  while (!timeClient.update()) {
+    timeClient.forceUpdate();
+    delay(500);
+  }
+  
+  // 현재 시간 출력 추가
+  Serial.print("Current time: ");
+  Serial.println(timeClient.getFormattedTime());
 
-  // 초기 날씨 정보 업데이트
-  getWeatherUpdate();
+  // base_time과 base_date 계산
+  int currentHour = timeClient.getHours();
+  int currentMinute = timeClient.getMinutes();
+  int baseHour = (currentMinute >= 40) ? currentHour : currentHour - 1;
+  if (baseHour < 0) baseHour = 23; // 전날로 넘어가는 경우 처리
+  base_time = String(baseHour < 10 ? "0" : "") + String(baseHour) + "00";
+
+  // 날짜 계산을 위한 타임스탬프 사용
+  time_t epochTime = timeClient.getEpochTime();
+  struct tm *ptm = gmtime((time_t *)&epochTime);
+  base_date = String(ptm->tm_year + 1900) +
+              String(ptm->tm_mon + 1 < 10 ? "0" : "") + String(ptm->tm_mon + 1) +
+              String(ptm->tm_mday < 10 ? "0" : "") + String(ptm->tm_mday);
+
+  Serial.println("Base Time: " + base_time);
+  Serial.println("Base Date: " + base_date);
+
+  // 중기예보용 basedatetime 계산
+  basedatetime = base_date + base_time;
+  Serial.println("BaseDateTime for 중기예보: " + basedatetime);
+
+  // 3. 현재 위치 호출 (임시로 서울 성북구 지정)
+  Serial.println("Location set to 성북구 (nx: " + String(location_x) + ", ny: " + String(location_y) + ")");
+
+  // 4. 단기예보 API 호출
+  callUltraSrtNcstAPI(); // 초단기 실황조회
+  callUltraSrtFcstAPI(); // 초단기 예보조회
+  callVilageFcstAPI();   // 단기예보조회
+  callFcstVersionAPI();  // 예보버전조회
+}
+
+void callAPI(const char* api_url, String params) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = String(api_url) + params;
+    
+    http.begin(url);
+    int httpResponseCode = http.GET();
+    
+    Serial.print("HTTP Response code: ");
+    Serial.println(httpResponseCode);
+    
+    if (httpResponseCode > 0) {
+      String response = http.getString();
+      Serial.println(response);
+    } else {
+      Serial.print("Error code: ");
+      Serial.println(httpResponseCode);
+    }
+    
+    http.end();
+  }
+}
+
+void callUltraSrtNcstAPI() { // 초단기 실황조회
+  Serial.println("초단기 실황조회 호출");
+  String params = "?serviceKey=" + String(api_key) +
+                  "&numOfRows=10&pageNo=1" +
+                  "&dataType=JSON" +
+                  "&base_date=" + base_date +
+                  "&base_time=" + base_time +
+                  "&nx=" + String(location_x) +
+                  "&ny=" + String(location_y);
+  callAPI(ultra_srt_ncst_url, params);
+}
+
+void callUltraSrtFcstAPI() { // 초단기 예보조회
+  Serial.println("초단기 예보조회 호출");
+  String params = "?serviceKey=" + String(api_key) +
+                  "&numOfRows=10&pageNo=1" +
+                  "&dataType=JSON" +
+                  "&base_date=" + base_date +
+                  "&base_time=" + base_time +
+                  "&nx=" + String(location_x) +
+                  "&ny=" + String(location_y);
+  callAPI(ultra_srt_fcst_url, params);
+}
+
+
+
+void callVilageFcstAPI() {
+  Serial.println("단기예보조회 호출");
+    int fcstHours[] = {2, 5, 8, 11, 14, 17, 20, 23};
+    int currentHour = timeClient.getHours();
+    String current_base_date = base_date;
+    String current_base_time;
+    
+    // 현재 시각보다 작은 가장 최근의 발표시각 찾기
+    int baseHourIndex = 7;
+    for(int i = 7; i >= 0; i--) {
+        if(currentHour >= fcstHours[i]) {
+            baseHourIndex = i;
+            break;
+        }
+    }
+
+    // 최대 3번 시도
+    for(int attempt = 0; attempt < 3; attempt++) {
+        // base_time 설정
+        current_base_time = String(fcstHours[baseHourIndex] < 10 ? "0" : "") 
+                           + String(fcstHours[baseHourIndex]) + "00";
+
+        // 02시보다 이전으로 가야하는 경우 날짜 변경
+        if(baseHourIndex < 0) {
+            // 전날 23시로 설정
+            baseHourIndex = 7;  // 23시 인덱스
+            // 전날 날짜 계산
+            time_t epochTime = timeClient.getEpochTime() - 86400; // 24시간 전
+            struct tm *ptm = gmtime((time_t *)&epochTime);
+            current_base_date = String(ptm->tm_year + 1900) +
+                              String(ptm->tm_mon + 1 < 10 ? "0" : "") + String(ptm->tm_mon + 1) +
+                              String(ptm->tm_mday < 10 ? "0" : "") + String(ptm->tm_mday);
+        }
+
+        String params = "?serviceKey=" + String(api_key) +
+                       "&numOfRows=10&pageNo=1" +
+                       "&dataType=JSON" +
+                       "&base_date=" + current_base_date +
+                       "&base_time=" + current_base_time +
+                       "&nx=" + String(location_x) +
+                       "&ny=" + String(location_y);
+
+        // API 호출 및 응답 확인
+        if(WiFi.status() == WL_CONNECTED) {
+            HTTPClient http;
+            String url = String(vilage_fcst_url) + params;
+            http.begin(url);
+            int httpResponseCode = http.GET();
+
+            if(httpResponseCode > 0) {
+                String response = http.getString();
+                // NO_DATA 체크
+                if(response.indexOf("\"resultCode\":\"03\"") == -1) {
+                    // 데이터가 있으면 공
+                    Serial.println("단기예보 데이터 찾음 - base_date: " + current_base_date + 
+                                 ", base_time: " + current_base_time);
+                    Serial.println(response);
+                    http.end();
+                    return;
+                }
+            }
+            http.end();
+        }
+
+        // 이전 시간대로 이동
+        baseHourIndex--;
+        Serial.println("데이터 없음, 이전 시간대 시도 - attempt: " + String(attempt + 1));
+    }
+    
+    Serial.println("단기예보 데이터를 찾을 수 없습니다.");
+}
+
+void callFcstVersionAPI() {
+  Serial.println("예보버전조회 호출");
+  String params = "?serviceKey=" + String(api_key) +
+                  "&numOfRows=10" +
+                  "&pageNo=1" +
+                  "&dataType=JSON" +
+                  "&ftype=ODAM" +
+                  "&basedatetime=" + basedatetime;
+  callAPI(fcst_version_url, params);
+}
+
+void processAPIResponse(String response) {
+  if (response.indexOf("\"resultCode\":\"00\"") != -1) {
+    // 성공적인 응답 처리
+    Serial.println("API 호출 성공");
+  } else {
+    // 에러 응답 처리
+    Serial.println("API 호출 실패");
+    Serial.println(response);
+  }
 }
 
 void loop() {
-  unsigned long currentMillis = millis();
-  if (currentMillis - previousMillis >= updateInterval) {
-    previousMillis = currentMillis;
-
-    // 타임서버 업데이트
-    timeClient.update();
-
-    // 현재 시간 출력
-    Serial.print("Current time: ");
-    Serial.println(timeClient.getFormattedTime());
-
-    // 날씨 정보 업데이트
-    getWeatherUpdate();
-  }
-}
-
-// 날씨 정보를 업데이트하는 함수
-void getWeatherUpdate() {
-  if (WiFi.status() == WL_CONNECTED) {
-    getShortTermWeather();
-    Serial.println();
-    GetMidLandForecast("Seoul"); // 'Seoul'을 사용하여 중기 육상예보 가져오기
-    Serial.println();
-    GetMidForecast("Seoul"); // 'Seoul'을 사용하여 중기 전망조회
-    Serial.println();
-    GetMidTemperature("Seoul"); // 'Seoul'을 사용하여 중기 기온조회
-    Serial.println();
-    GetMidSeaForecast("동해북부"); // '동해북부'를 사용하여 중기 해상예보 가져오기
-    Serial.println();
-    Serial.println();
-  }
-}
-
-// 단기예보를 가져오는 함수
-void getShortTermWeather() {
-  // 현재 날짜와 시간을 가져와 YYYYMMDD 및 HHMM 형식으로 반환
-  time_t now = timeClient.getEpochTime(); // 현재 epoch 시간 가져오기
-  struct tm* timeinfo = localtime(&now); // epoch 시간을 로컬 시간으로 변환
-
-  // 날짜를 YYYYMMDD 형식으로 포맷팅
-  char dateBuffer[11]; // 날짜를 저장할 버퍼
-  strftime(dateBuffer, sizeof(dateBuffer), "%Y%m%d", timeinfo); // 날짜를 YYYYMMDD 형식으로 포맷팅
-  String currentDate = String(dateBuffer); // 문자열로 변환
-
-  // 시간을 HHMM 형식으로 포맷팅 (매시각 30분 이후에 데이터가 생성되므로 40분 이전에는 이전 시간을 사용)
-  int hour = timeinfo->tm_hour;
-  int minute = timeinfo->tm_min;
-  if (minute < 40) {
-    hour -= 1;
-  }
-  if (hour < 0) {
-    hour += 24;
-    timeinfo->tm_mday -= 1;
-    strftime(dateBuffer, sizeof(dateBuffer), "%Y%m%d", timeinfo); // 날짜를 YYYYMMDD 형식으로 포맷팅
-    currentDate = String(dateBuffer); // 문자열로 변환
-  }
-  char timeBuffer[5]; // 시간을 저장할 버퍼
-  snprintf(timeBuffer, sizeof(timeBuffer), "%02d00", hour); // 시간을 HH00 형식으로 포맷팅
-  String currentTime = String(timeBuffer); // 문자열로 변환
-
-  HTTPClient http;
-  String weatherURL = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getUltraSrtFcst";
-  weatherURL += "?serviceKey=" + String(apiKey);
-  weatherURL += "&numOfRows=60&pageNo=1&base_date=" + currentDate;
-  weatherURL += "&base_time=" + currentTime + "&nx=" + String(NX) + "&ny=" + String(NY);
-  weatherURL += "&dataType=JSON"; // JSON 형식으로 요청
-
-  http.begin(weatherURL);
-  int httpCode = http.GET();
-
-  if (httpCode > 0) {
-    String payload = http.getString();
-    JSONVar response = JSON.parse(payload);
-
-    if (JSON.typeof(response) == "undefined") {
-      Serial.println("Parsing input failed!");
-      return;
-    }
-
-    JSONVar items = response["response"]["body"]["items"]["item"];
-    std::map<String, std::map<String, String>> forecastData;
-
-    for (int i = 0; i < items.length(); i++) {
-      String fcstTime = (const char*)items[i]["fcstTime"];
-      String category = (const char*)items[i]["category"];
-      String fcstValue = (const char*)items[i]["fcstValue"];
-
-      forecastData[fcstTime][category] = fcstValue;
-    }
-
-    Serial.println("시간 - 기온 - 하늘상태 - 습도 - 강수량 - 강수형태 - 낙뢰 - 풍향 - 풍속");
-    for (const auto& timeEntry : forecastData) {
-      String fcstTime = timeEntry.first;
-      const auto& data = timeEntry.second;
-
-      String T1H = data.count("T1H") ? data.at("T1H") + "℃" : "-";
-      String SKY = data.count("SKY") ? data.at("SKY") : "-";
-      String REH = data.count("REH") ? data.at("REH") + "%" : "-";
-      String RN1 = data.count("RN1") ? data.at("RN1") : "-";
-      String PTY = data.count("PTY") ? data.at("PTY") : "-";
-      String LGT = data.count("LGT") ? data.at("LGT") : "-";
-      String VEC = data.count("VEC") ? data.at("VEC") + "°" : "-";
-      String WSD = data.count("WSD") ? data.at("WSD") + "m/s" : "-";
-
-      Serial.print(fcstTime);
-      Serial.print(" - ");
-      Serial.print(T1H);
-      Serial.print(" - ");
-      Serial.print(SKY);
-      Serial.print(" - ");
-      Serial.print(REH);
-      Serial.print(" - ");
-      Serial.print(RN1);
-      Serial.print(" - ");
-      Serial.print(PTY);
-      Serial.print(" - ");
-      Serial.print(LGT);
-      Serial.print(" - ");
-      Serial.print(VEC);
-      Serial.print(" - ");
-      Serial.println(WSD);
-    }
-  } else {
-    Serial.print("Error on HTTP request: ");
-    Serial.println(httpCode);
-  }
-  http.end();
-}
-
-// 발표 시각을 YYYYMMDDHHMM 형식으로 반환하는 함수
-String getForecastTime() {
-  timeClient.update();
-  time_t now = timeClient.getEpochTime();
-  struct tm* timeinfo = localtime(&now);
-  char timeBuffer[15];
-
-  // 현재 시간이 0600 이후이고 1800 이전이면 0600 발표 시각 사용
-  // 현재 시간이 1800 이후이면 1800 발표 시각 사용
-  if (timeinfo->tm_hour < 6) {
-    // 이전 날 18:00 예보 시각 사용
-    timeinfo->tm_hour = 18;
-    timeinfo->tm_mday -= 1;
-    strftime(timeBuffer, sizeof(timeBuffer), "%Y%m%d1800", timeinfo);
-  } else if (timeinfo->tm_hour < 18) {
-    // 같은 날 06:00 예보 시각 사용
-    strftime(timeBuffer, sizeof(timeBuffer), "%Y%m%d0600", timeinfo);
-  } else {
-    // 같은 날 18:00 예보 시각 사용
-    strftime(timeBuffer, sizeof(timeBuffer), "%Y%m%d1800", timeinfo);
-  }
-  return String(timeBuffer);
-}
-
-// 중기전망조회 함수
-void GetMidForecast(String city) {
-  String midForecastTime = getForecastTime();
-
-  HTTPClient http;
-  String weatherURL = "http://apis.data.go.kr/1360000/MidFcstInfoService/getMidFcst";
-  weatherURL += "?serviceKey=" + String(apiKey);
-  weatherURL += "&numOfRows=10&pageNo=1&stnId=109"; // 서울/인천/경기도 지역의 경우 109 사용
-  weatherURL += "&tmFc=" + midForecastTime;
-  weatherURL += "&dataType=JSON"; // JSON 형식으로 요청
-
-  http.begin(weatherURL);
-  int httpCode = http.GET();
-
-  if (httpCode > 0) {
-    String payload = http.getString();
-    Serial.println("Mid-term Forecast Data: ");
-    
-    // 특수문자 및 따옴표 제거 및 줄바꿈 출력
-    String formattedPayload = formatPayload(payload);
-    Serial.println(formattedPayload);
-  } else {
-    Serial.print("Error on HTTP request: ");
-    Serial.println(httpCode);
-  }
-  http.end();
-}
-
-// 중기 육상예보조회 함수
-void GetMidLandForecast(String city) {
-  String midForecastTime = getForecastTime();
-
-  HTTPClient http;
-  String weatherURL = "http://apis.data.go.kr/1360000/MidFcstInfoService/getMidLandFcst";
-  weatherURL += "?serviceKey=" + String(apiKey);
-  weatherURL += "&numOfRows=10&pageNo=1&regId=" + getRegionId(city);
-  weatherURL += "&tmFc=" + midForecastTime;
-  weatherURL += "&dataType=JSON"; // JSON 형식으로 요청
-
-  http.begin(weatherURL);
-  int httpCode = http.GET();
-
-  if (httpCode > 0) {
-    String payload = http.getString();
-    Serial.println("Mid-term Land Forecast Data: ");
-    
-    // 특수문자 및 따옴표 제거 및 줄바꿈 출력
-    String formattedPayload = formatPayload(payload);
-    Serial.println(formattedPayload);
-  } else {
-    Serial.print("Error on HTTP request: ");
-    Serial.println(httpCode);
-  }
-  http.end();
-}
-
-// 중기 기온조회 함수
-void GetMidTemperature(String city) {
-  String midForecastTime = getForecastTime();
-
-  HTTPClient http;
-  String weatherURL = "http://apis.data.go.kr/1360000/MidFcstInfoService/getMidTa";
-  weatherURL += "?serviceKey=" + String(apiKey);
-  weatherURL += "&numOfRows=10&pageNo=1&regId=" + getTemperatureRegionId(city);
-  weatherURL += "&tmFc=" + midForecastTime;
-  weatherURL += "&dataType=JSON"; // JSON 형식으로 요청
-
-  http.begin(weatherURL);
-  int httpCode = http.GET();
-
-  if (httpCode > 0) {
-    String payload = http.getString();
-    Serial.println("Mid-term Temperature Data: ");
-    
-    // 특수문자 및 따옴표 제거 및 줄바꿈 출력
-    String formattedPayload = formatPayload(payload);
-    Serial.println(formattedPayload);
-  } else {
-    Serial.print("Error on HTTP request: ");
-    Serial.println(httpCode);
-  }
-  http.end();
-}
-
-// 중기 해상예보조회 함수
-void GetMidSeaForecast(String region) {
-  String midForecastTime = getForecastTime();
-
-  HTTPClient http;
-  String weatherURL = "http://apis.data.go.kr/1360000/MidFcstInfoService/getMidSeaFcst";
-  weatherURL += "?serviceKey=" + String(apiKey);
-  weatherURL += "&numOfRows=10&pageNo=1&regId=" + getSeaRegionId(region);
-  weatherURL += "&tmFc=" + midForecastTime;
-  weatherURL += "&dataType=JSON"; // JSON 형식으로 요청
-
-  http.begin(weatherURL);
-  int httpCode = http.GET();
-
-  if (httpCode > 0) {
-    String payload = http.getString();
-    Serial.println("Mid-term Sea Forecast Data: ");
-    
-    // 특수문자 및 따옴표 제거 및 줄바꿈 출력
-    String formattedPayload = formatPayload(payload);
-    Serial.println(formattedPayload);
-  } else {
-    Serial.print("Error on HTTP request: ");
-    Serial.println(httpCode);
-  }
-  http.end();
-}
-
-// 날씨 API의 응답 데이터를 포맷하는 함수
-String formatPayload(String payload) {
-  payload.replace("{", ""); // '{' 제거
-  payload.replace("}", ""); // '}' 제거
-  payload.replace("[", ""); // '[' 제거
-  payload.replace("]", ""); // ']' 제거
-  payload.replace("(", ""); // '(' 제거
-  payload.replace(")", ""); // ')' 제거
-  payload.replace("\"", ""); // '"' 제거
-  payload.replace(",", ",\n"); // ',' 뒤에 줄바꿈 추가
-  return payload;
+  // 추후 API 호출 및 데이터 처리 반복
 }
